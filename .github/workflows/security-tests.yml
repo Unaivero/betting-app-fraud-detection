@@ -1,0 +1,529 @@
+name: 🛡️ Advanced Security & Fraud Detection Pipeline
+
+on:
+  push:
+    branches: [ main, develop, feature/* ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run comprehensive security tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      test_suite:
+        description: 'Test suite to run'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - security
+          - fraud-detection
+          - performance
+          - mobile
+          - api-security
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      device_type:
+        description: 'Device type for mobile tests'
+        required: false
+        default: 'android'
+        type: choice
+        options:
+          - android
+          - ios
+          - both
+
+env:
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.11'
+  ALLURE_VERSION: '2.24.0'
+
+jobs:
+  security-validation:
+    name: 🔒 Security Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        test-type: [authentication, injection, csrf, headers]
+        
+    steps:
+    - name: 🚀 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Setup Python Environment
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+        
+    - name: 🟢 Setup Node.js Environment
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: 📦 Install Dependencies
+      run: |
+        npm ci
+        pip install -r requirements-security.txt
+        
+    - name: 🔧 Setup Test Environment
+      run: |
+        mkdir -p test-results allure-results screenshots
+        chmod +x scripts/setup-security-env.sh
+        ./scripts/setup-security-env.sh
+        
+    - name: 🔒 Run Security Tests - ${{ matrix.test-type }}
+      env:
+        TEST_ENV: ${{ github.event.inputs.environment || 'dev' }}
+        SECURITY_TEST_TYPE: ${{ matrix.test-type }}
+        HEADLESS: true
+      run: |
+        case "${{ matrix.test-type }}" in
+          "authentication")
+            npm run test:security:auth
+            ;;
+          "injection")
+            npm run test:security:injection
+            ;;
+          "csrf")
+            npm run test:security:csrf
+            ;;
+          "headers")
+            npm run test:security:headers
+            ;;
+        esac
+        
+    - name: 📊 Generate Security Report
+      if: always()
+      run: |
+        npm run report:security
+        python scripts/analyze-security-results.py
+        
+    - name: 📤 Upload Security Test Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-results-${{ matrix.test-type }}
+        path: |
+          allure-results/
+          test-results/
+          screenshots/
+        retention-days: 30
+
+  fraud-detection-tests:
+    name: 🤖 ML Fraud Detection Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: security-validation
+    
+    strategy:
+      matrix:
+        fraud-scenario: [behavioral, network, biometric, temporal]
+        
+    steps:
+    - name: 🚀 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Setup Python ML Environment
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: 🧠 Install ML Dependencies
+      run: |
+        pip install -r requirements-ml.txt
+        pip install scikit-learn==1.3.0 tensorflow==2.13.0 torch==2.0.1
+        
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: 📦 Install Application Dependencies
+      run: npm ci
+      
+    - name: 🔄 Setup ML Models
+      run: |
+        python scripts/setup-ml-models.py
+        chmod +x scripts/download-training-data.sh
+        ./scripts/download-training-data.sh
+        
+    - name: 🤖 Run Fraud Detection Tests - ${{ matrix.fraud-scenario }}
+      env:
+        FRAUD_SCENARIO: ${{ matrix.fraud-scenario }}
+        ML_MODEL_PATH: ./models/
+        TEST_ENV: ${{ github.event.inputs.environment || 'dev' }}
+      run: |
+        case "${{ matrix.fraud-scenario }}" in
+          "behavioral")
+            npm run test:fraud:behavioral
+            ;;
+          "network")
+            npm run test:fraud:network
+            ;;
+          "biometric")
+            npm run test:fraud:biometric
+            ;;
+          "temporal")
+            npm run test:fraud:temporal
+            ;;
+        esac
+        
+    - name: 📈 Analyze ML Performance
+      run: |
+        python scripts/analyze-ml-performance.py
+        npm run report:fraud-detection
+        
+    - name: 📤 Upload Fraud Detection Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: fraud-detection-${{ matrix.fraud-scenario }}
+        path: |
+          ml-results/
+          fraud-reports/
+          model-metrics/
+
+  mobile-security-tests:
+    name: 📱 Mobile Security Testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    strategy:
+      matrix:
+        platform: [android, ios]
+        include:
+          - platform: android
+            device: "Android Emulator"
+            api_level: 30
+          - platform: ios
+            device: "iPhone Simulator"
+            ios_version: "15.0"
+            
+    steps:
+    - name: 🚀 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: 📦 Install Dependencies
+      run: npm ci
+      
+    - name: 🔧 Setup Mobile Testing Environment
+      run: |
+        if [ "${{ matrix.platform }}" == "android" ]; then
+          echo "Setting up Android environment"
+          wget -q -O android-sdk.zip https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip
+          unzip -q android-sdk.zip -d android-sdk
+          export ANDROID_HOME=$(pwd)/android-sdk
+          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin
+        fi
+        
+        npm install -g appium@next
+        appium driver install uiautomator2
+        appium driver install xcuitest
+        
+    - name: 🚀 Start Appium Server
+      run: |
+        appium server &
+        sleep 10
+        
+    - name: 📱 Run Mobile Security Tests
+      env:
+        PLATFORM: ${{ matrix.platform }}
+        DEVICE_NAME: ${{ matrix.device }}
+        TEST_ENV: ${{ github.event.inputs.environment || 'dev' }}
+      run: |
+        if [ "${{ github.event.inputs.device_type }}" == "both" ] || [ "${{ github.event.inputs.device_type }}" == "${{ matrix.platform }}" ]; then
+          npm run test:mobile:security:${{ matrix.platform }}
+        else
+          echo "Skipping ${{ matrix.platform }} tests based on input selection"
+        fi
+        
+    - name: 📤 Upload Mobile Test Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: mobile-security-${{ matrix.platform }}
+        path: |
+          mobile-results/
+          device-logs/
+          crash-reports/
+
+  api-security-tests:
+    name: 🌐 API Security Testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    
+    steps:
+    - name: 🚀 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: 📦 Install Dependencies
+      run: |
+        npm ci
+        pip install -r requirements-api-security.txt
+        
+    - name: 🔐 Setup API Security Tools
+      run: |
+        # Install OWASP ZAP
+        wget -q https://github.com/zaproxy/zaproxy/releases/download/v2.14.0/ZAP_2_14_0_Linux.tar.gz
+        tar -xzf ZAP_2_14_0_Linux.tar.gz
+        
+        # Setup Nuclei for vulnerability scanning
+        wget -q https://github.com/projectdiscovery/nuclei/releases/download/v3.0.4/nuclei_3.0.4_linux_amd64.zip
+        unzip nuclei_3.0.4_linux_amd64.zip
+        chmod +x nuclei
+        
+    - name: 🌐 Run API Security Tests
+      env:
+        API_BASE_URL: ${{ secrets.API_BASE_URL || 'http://localhost:3000' }}
+        TEST_ENV: ${{ github.event.inputs.environment || 'dev' }}
+      run: |
+        # Start ZAP daemon
+        ./ZAP_2.14.0/zap.sh -daemon -host 127.0.0.1 -port 8080 &
+        sleep 30
+        
+        # Run API security tests
+        npm run test:api:security
+        
+        # Run vulnerability scanning
+        python scripts/run-api-security-scan.py
+        
+    - name: 📊 Generate API Security Report
+      run: |
+        python scripts/generate-api-security-report.py
+        
+    - name: 📤 Upload API Security Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: api-security-results
+        path: |
+          api-security-results/
+          zap-reports/
+          nuclei-results/
+
+  performance-under-attack:
+    name: ⚡ Performance Under Attack Testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    
+    steps:
+    - name: 🚀 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: 📦 Install Dependencies
+      run: |
+        npm ci
+        npm install -g artillery@latest
+        
+    - name: ⚡ Run Performance Security Tests
+      env:
+        TARGET_URL: ${{ secrets.TARGET_URL || 'http://localhost:3000' }}
+        TEST_ENV: ${{ github.event.inputs.environment || 'dev' }}
+      run: |
+        # Test normal load performance
+        npm run test:performance:baseline
+        
+        # Test performance under DDoS simulation
+        npm run test:performance:ddos
+        
+        # Test performance with fraud detection active
+        npm run test:performance:fraud-detection
+        
+    - name: 📊 Analyze Performance Results
+      run: |
+        python scripts/analyze-performance-under-attack.py
+        
+    - name: 📤 Upload Performance Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: performance-under-attack
+        path: |
+          performance-results/
+          load-test-reports/
+
+  compliance-validation:
+    name: 📋 Compliance & Regulatory Testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    
+    steps:
+    - name: 🚀 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: 📦 Install Dependencies
+      run: npm ci
+      
+    - name: 📋 Run Compliance Tests
+      env:
+        TEST_ENV: ${{ github.event.inputs.environment || 'dev' }}
+      run: |
+        # GDPR Compliance Tests
+        npm run test:compliance:gdpr
+        
+        # PCI DSS Compliance Tests
+        npm run test:compliance:pci-dss
+        
+        # Gaming Regulation Compliance
+        npm run test:compliance:gaming
+        
+        # AML/KYC Compliance Tests
+        npm run test:compliance:aml-kyc
+        
+    - name: 📊 Generate Compliance Report
+      run: |
+        npm run report:compliance
+        
+    - name: 📤 Upload Compliance Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: compliance-results
+        path: |
+          compliance-reports/
+          regulatory-audit/
+
+  security-summary:
+    name: 📊 Security Test Summary
+    runs-on: ubuntu-latest
+    needs: [security-validation, fraud-detection-tests, mobile-security-tests, api-security-tests, performance-under-attack, compliance-validation]
+    if: always()
+    
+    steps:
+    - name: 🚀 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 📥 Download All Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./all-results
+        
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: 📊 Generate Comprehensive Security Report
+      run: |
+        pip install jinja2 plotly pandas
+        python scripts/generate-comprehensive-security-report.py
+        
+    - name: 📈 Create Security Dashboard
+      run: |
+        python scripts/create-security-dashboard.py
+        
+    - name: 📢 Post Security Summary
+      run: |
+        echo "## 🛡️ Security Test Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+        echo "### Test Results:" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ needs.security-validation.result }}" == "success" ]; then
+          echo "✅ Security Validation: PASSED" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Security Validation: FAILED" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ needs.fraud-detection-tests.result }}" == "success" ]; then
+          echo "✅ Fraud Detection: PASSED" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Fraud Detection: FAILED" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ needs.mobile-security-tests.result }}" == "success" ]; then
+          echo "✅ Mobile Security: PASSED" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Mobile Security: FAILED" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "### 📊 Key Metrics:" >> $GITHUB_STEP_SUMMARY
+        python scripts/extract-key-metrics.py >> $GITHUB_STEP_SUMMARY
+        
+    - name: 📤 Upload Final Security Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: comprehensive-security-report
+        path: |
+          security-dashboard/
+          final-reports/
+        retention-days: 90
+        
+    - name: 🚨 Security Alert Notification
+      if: failure()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: '🚨 Security Test Failure Alert',
+            body: `**Security Pipeline Failed**\n\nWorkflow: ${context.workflow}\nRun: ${context.runNumber}\nCommit: ${context.sha}\n\nPlease review the security test results and address any critical issues.`,
+            labels: ['security', 'urgent', 'bug']
+          })
+
+  security-metrics:
+    name: 📈 Security Metrics Collection
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - name: 🚀 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 📊 Collect Security Metrics
+      run: |
+        python scripts/collect-security-metrics.py
+        
+    - name: 📈 Update Security Trends
+      run: |
+        python scripts/update-security-trends.py
+        
+    - name: 📤 Upload Metrics
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-metrics
+        path: |
+          metrics/
+          trends/

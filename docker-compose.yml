@@ -1,0 +1,442 @@
+version: '3.8'
+
+services:
+  # Betting App Mock Server
+  betting-app-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: betting-app-server
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgres://postgres:password@postgres:5432/betting_db
+      - JWT_SECRET=fraud_detection_secret_key
+      - FRAUD_DETECTION_ENABLED=true
+    volumes:
+      - ./app:/app
+      - ./logs:/app/logs
+    networks:
+      - fraud-detection-network
+    depends_on:
+      - postgres
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # WebDriverIO Test Runner
+  fraud-test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.tests
+    container_name: fraud-test-runner
+    depends_on:
+      betting-app-server:
+        condition: service_healthy
+      selenium-hub:
+        condition: service_started
+    environment:
+      - TEST_ENV=docker
+      - BASE_URL=http://betting-app-server:3000
+      - SELENIUM_HUB_URL=http://selenium-hub:4444/wd/hub
+      - APPIUM_URL=http://appium-server:4723/wd/hub
+      - ML_MODELS_PATH=/app/models
+      - FRAUD_DETECTION_API=http://ml-fraud-detector:5000
+    volumes:
+      - ./test:/app/test
+      - ./allure-results:/app/allure-results
+      - ./screenshots:/app/screenshots
+      - ./models:/app/models
+      - .:/app
+    networks:
+      - fraud-detection-network
+    command: ["npm", "run", "test:docker"]
+    profiles:
+      - test
+
+  # Selenium Grid Hub
+  selenium-hub:
+    image: selenium/hub:4.15.0
+    container_name: selenium-hub
+    ports:
+      - "4444:4444"
+    environment:
+      - GRID_MAX_SESSION=16
+      - GRID_BROWSER_TIMEOUT=300
+      - GRID_TIMEOUT=300
+    networks:
+      - fraud-detection-network
+
+  # Chrome Node for Selenium Grid
+  selenium-chrome:
+    image: selenium/node-chrome:4.15.0
+    container_name: selenium-chrome
+    shm_size: 2gb
+    depends_on:
+      - selenium-hub
+    environment:
+      - HUB_HOST=selenium-hub
+      - HUB_PORT=4444
+      - NODE_MAX_INSTANCES=2
+      - NODE_MAX_SESSION=2
+    volumes:
+      - /dev/shm:/dev/shm
+    networks:
+      - fraud-detection-network
+    scale: 2
+
+  # Firefox Node for Selenium Grid
+  selenium-firefox:
+    image: selenium/node-firefox:4.15.0
+    container_name: selenium-firefox
+    shm_size: 2gb
+    depends_on:
+      - selenium-hub
+    environment:
+      - HUB_HOST=selenium-hub
+      - HUB_PORT=4444
+      - NODE_MAX_INSTANCES=1
+      - NODE_MAX_SESSION=1
+    volumes:
+      - /dev/shm:/dev/shm
+    networks:
+      - fraud-detection-network
+
+  # Appium Server for Mobile Testing
+  appium-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.appium
+    container_name: appium-server
+    ports:
+      - "4723:4723"
+    environment:
+      - APPIUM_HOST=0.0.0.0
+      - APPIUM_PORT=4723
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - ./mobile-apps:/apps
+    privileged: true
+    networks:
+      - fraud-detection-network
+
+  # Android Emulator
+  android-emulator:
+    image: budtmo/docker-android:emulator_11.0
+    container_name: android-emulator
+    ports:
+      - "6080:6080"  # Web interface
+      - "5554:5554"  # ADB port
+    environment:
+      - EMULATOR_DEVICE=Samsung Galaxy S10
+      - WEB_VNC=true
+      - APPIUM=true
+      - CONNECT_TO_GRID=true
+      - SELENIUM_HOST=selenium-hub
+      - SELENIUM_PORT=4444
+    privileged: true
+    volumes:
+      - /dev/kvm:/dev/kvm
+    networks:
+      - fraud-detection-network
+    profiles:
+      - mobile
+
+  # ML Fraud Detection Service
+  ml-fraud-detector:
+    build:
+      context: .
+      dockerfile: Dockerfile.ml
+    container_name: ml-fraud-detector
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+      - MODEL_PATH=/app/models
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgres://postgres:password@postgres:5432/fraud_db
+    volumes:
+      - ./ml-models:/app/models
+      - ./ml-data:/app/data
+      - ./ml-logs:/app/logs
+    networks:
+      - fraud-detection-network
+    depends_on:
+      - postgres
+      - redis
+
+  # Real-time Fraud Monitoring
+  fraud-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitor
+    container_name: fraud-monitor
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgres://postgres:password@postgres:5432/fraud_db
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL}
+    volumes:
+      - ./monitoring:/app/monitoring
+      - ./alerts:/app/alerts
+    networks:
+      - fraud-detection-network
+    depends_on:
+      - kafka
+      - redis
+      - postgres
+    profiles:
+      - monitoring
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: postgres-fraud-db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=betting_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+    networks:
+      - fraud-detection-network
+
+  # Redis for Caching and Session Management
+  redis:
+    image: redis:7-alpine
+    container_name: redis-fraud-cache
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass fraud_detection_redis_pass
+    volumes:
+      - redis_data:/data
+    networks:
+      - fraud-detection-network
+
+  # Kafka for Real-time Event Streaming
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - fraud-detection-network
+    profiles:
+      - monitoring
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - fraud-detection-network
+    profiles:
+      - monitoring
+
+  # Elasticsearch for Log Analysis
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - fraud-detection-network
+    profiles:
+      - logging
+
+  # Kibana for Log Visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: kibana
+    depends_on:
+      - elasticsearch
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    networks:
+      - fraud-detection-network
+    profiles:
+      - logging
+
+  # Grafana for Metrics Visualization
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=fraud_detection_admin
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - fraud-detection-network
+    profiles:
+      - monitoring
+
+  # Prometheus for Metrics Collection
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - fraud-detection-network
+    profiles:
+      - monitoring
+
+  # Allure Report Server
+  allure-server:
+    image: frankescobar/allure-docker-service:2.24.0
+    container_name: allure-server
+    ports:
+      - "5050:5050"
+    environment:
+      CHECK_RESULTS_EVERY_SECONDS: 3
+      KEEP_HISTORY: 25
+    volumes:
+      - ./allure-results:/app/allure-results
+      - ./allure-reports:/app/default-reports
+    networks:
+      - fraud-detection-network
+    profiles:
+      - reports
+
+  # Security Scanner (OWASP ZAP)
+  zap-scanner:
+    image: owasp/zap2docker-stable:latest
+    container_name: zap-scanner
+    depends_on:
+      betting-app-server:
+        condition: service_healthy
+    volumes:
+      - ./security-reports:/zap/wrk/reports
+    networks:
+      - fraud-detection-network
+    command: |
+      zap-full-scan.py 
+      -t http://betting-app-server:3000 
+      -r zap-fraud-detection-report.html 
+      -w zap-fraud-detection-report.md
+    profiles:
+      - security-scan
+
+  # Performance Testing with Artillery
+  performance-tester:
+    build:
+      context: .
+      dockerfile: Dockerfile.performance
+    container_name: performance-tester
+    depends_on:
+      betting-app-server:
+        condition: service_healthy
+    environment:
+      - TARGET_URL=http://betting-app-server:3000
+      - TEST_DURATION=300s
+      - VIRTUAL_USERS=100
+    volumes:
+      - ./performance-tests:/app/tests
+      - ./performance-reports:/app/reports
+    networks:
+      - fraud-detection-network
+    profiles:
+      - performance
+
+  # Test Report Aggregator
+  report-aggregator:
+    build:
+      context: .
+      dockerfile: Dockerfile.reports
+    container_name: report-aggregator
+    ports:
+      - "8080:80"
+    volumes:
+      - ./allure-reports:/usr/share/nginx/html/allure
+      - ./security-reports:/usr/share/nginx/html/security
+      - ./performance-reports:/usr/share/nginx/html/performance
+      - ./nginx-reports.conf:/etc/nginx/nginx.conf
+    networks:
+      - fraud-detection-network
+    profiles:
+      - reports
+
+networks:
+  fraud-detection-network:
+    driver: bridge
+    name: fraud-detection-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  elasticsearch_data:
+    driver: local
+  grafana_data:
+    driver: local
+  prometheus_data:
+    driver: local
+
+# Additional compose files for different environments
+---
+# docker-compose.override.yml (for development)
+version: '3.8'
+
+services:
+  betting-app-server:
+    environment:
+      - NODE_ENV=development
+      - DEBUG=betting:*
+    volumes:
+      - .:/app
+    command: ["npm", "run", "dev"]
+
+  fraud-test-runner:
+    environment:
+      - LOG_LEVEL=debug
+    command: ["tail", "-f", "/dev/null"]  # Keep container running for interactive testing
+
+  ml-fraud-detector:
+    environment:
+      - FLASK_DEBUG=true
+    volumes:
+      - .:/app
+    command: ["python", "app.py"]
