@@ -80,7 +80,7 @@ jobs:
         
     - name: 🔧 Setup Test Environment
       run: |
-        mkdir -p test-results allure-results screenshots
+        mkdir -p test-results
         # Only run setup script if it exists
         if [ -f "scripts/setup-security-env.sh" ]; then
           chmod +x scripts/setup-security-env.sh
@@ -139,9 +139,7 @@ jobs:
       with:
         name: security-results-${{ matrix.test-type }}
         path: |
-          allure-results/
           test-results/
-          screenshots/
         retention-days: 30
 
   fraud-detection-tests:
